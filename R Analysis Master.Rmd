@@ -1,0 +1,684 @@
+---
+title: "Getting Unstuck Data Analysis Fall 2020"
+author: "Carter Zenke"
+date: "12/17/2020"
+output: html_document
+---
+
+# Set up the working environment
+```{r setup}
+rm(list = ls()) # Remove all previous loaded datasets
+
+library(readr) # Import readr for reading in csv files
+library(dplyr) # Import dplyr for csv manipulation
+library(stringr) # Import stringr for parsing strings
+
+getwd() # Check that working directory is correctly set to where this markdown file is located.
+```
+
+### Import CSV's
+```{r import}
+intro_survey <- read_csv("survey_intro_data/survey_intro_updated_username.csv") # Read in our intro survey csv (with column for usernames we found manually)
+exit_survey <- read_csv("survey_exit_data/mailchimp_2020_exit.csv") # Read in our exit survey csv
+gu_participants <- read_csv("gu_participants/gu_project_participants_from_clowder.csv") # Read in set of GU participants who made at least 1 project, according to Clowder
+projects <- read_csv ("studio_projects_csv/allProjects.csv") # Read in the project CSV we Created with our Python script
+comments <- read_csv("comment_csv/commentsAllStudios.csv") # Read in the comment CSV we created with our Python script
+```
+
+### Recode entries
+```{r recode}
+# Lowercase all id's used for matching
+intro_survey <- intro_survey %>% mutate(username = tolower(username))
+intro_survey <- intro_survey %>% mutate(email = tolower(email))
+exit_survey <- exit_survey %>% mutate(email = tolower(email))
+exit_survey <- exit_survey %>% mutate(email2 = tolower(email2))
+comments <- comments %>% mutate(username = tolower(username))
+comments <- comments %>% mutate(commenter = tolower(commenter))
+comments <- comments %>% mutate(reply_to = tolower(reply_to))
+projects <- projects %>% mutate(author = tolower(author))
+```
+
+### Check for duplicates in intro survey
+```{r check-duplicates}
+n_occur <- data.frame(table(intro_survey$username)) # Creates dataframe with two columns: username and frequency (of username)
+intro_survey[intro_survey$username %in% n_occur$Var1[n_occur$Freq > 1],"username"] # Prints usernames that have occurred more than once
+intro_survey <- intro_survey[!duplicated(intro_survey$username),] # Removes the first entry of a duplicated username (later entries are prioritized under the thinking that these represent corrections)
+```
+
+# Create new datasets for analysis
+### Merge intro and Exit Surveys
+```{r merge-surveys}
+merged_2020_survey <- left_join(intro_survey, exit_survey, by = "email") # Join the exit survey to the intro survey using "email" column as a matching ID
+merged_2020_survey_no_na <- merged_2020_survey %>% filter(!is.na(merged_2020_survey[,31:50])) # Remove entries that did not match
+write.csv(merged_2020_survey, "survey_data_merged/merged_2020_survey_with_NA.csv", row.names = FALSE) # Write to file
+write.csv(merged_2020_survey_no_na, "survey_data_merged/merged_2020_survey_no_NA.csv", row.names = FALSE) # Write to file
+
+mismatched_email <- exit_survey %>% filter(email != email2) %>% select(email2) # Our exit survey asks for email twice. We create a dataframe of secondary emails that did not match the first email a participant gave...
+which(intro_survey$email %in% mismatched_email$email2) # Then find entries from the intro survey that have emails matching these secondary emails
+# We can then manually merge these entries in the CSV's we wrote 4 lines earlier (not sure how to do this in R)
+```
+
+### Link project-making participants and survey takers
+```{r link-participants-to-surveys}
+intro_survey_participant_check <- left_join(intro_survey, gu_participants, by = "username") # Merge participant list into intro survey list 
+
+intro_survey_participants <- intro_survey_participant_check %>% filter(!is.na(participated)) # Find survey takers who did participate
+write.csv(intro_survey_participants, "survey_intro_data/survey_intro_participants.csv", row.names = FALSE) # Write to CSV
+
+intro_survey_non_participants <- intro_survey_participant_check %>% filter(is.na(participated)) # Find survey takers who did not participate
+
+participants_no_intro_survey <- left_join(gu_participants, intro_survey, by = "username") %>% filter(is.na(Name)) # Find participants who did not take an intro survey
+write.csv(participants_no_intro_survey, "participants_with_limited_survey_data/participants_no_intro_survey.csv", row.names = FALSE) # Write to CSV
+
+intro_survey_participants_no_exit_survey <- left_join(intro_survey_participants, exit_survey, by=c("email")) %>% filter(is.na(prior_gu.y)) # Find participants who took the intro survey but not the exit survey
+write.csv(intro_survey_participants_no_exit_survey, "participants_with_limited_survey_data/survey_intro_participants_no_exit_survey.csv", row.names = FALSE) # Write to CSV
+```
+
+### Define skill groups
+```{r define-skill-groups}
+facilitators <- c("paulinah", "kboyceq", "sleifer", "mrquentin", "karenb") # Define facilitators
+intro_survey_participants_no_facilitators <- intro_survey_participants %>% filter(!username %in% facilitators) # Remove facilitators from intro survey
+novices <- intro_survey_participants_no_facilitators %>% filter(familiarity %in% c("Never", "Seen", "Novice") & prior_gu == "No") # Define novices ("Low Familiarity") as those who have never seen scratch, have only seen it a few times, or have only made a few projects AND have not participated in GU before
+experts <- intro_survey_participants_no_facilitators %>% filter(familiarity %in% c("Helped", "Well-acquainted") | prior_gu == "Yes") # Define experts ("High Familiarity") as those who have helped others make projects or are well-acquainted with Scratch OR have participated in GU before
+
+
+count(novices) + count(experts) == count(intro_survey_participants_no_facilitators) # Check division
+
+# Write groupings to CSV's
+write.csv(experts, "~/HGSE/Getting Unstuck/Reply Mapping Analysis/Output/survey_intro_participants_experts.csv", row.names = FALSE)
+write.csv(novices, "~/HGSE/Getting Unstuck/Reply Mapping Analysis/Output/survey_intro_participants_novices.csv", row.names = FALSE)
+write.csv(intro_survey_participants_no_facilitators, "~/HGSE/Getting Unstuck/Reply Mapping Analysis/Output/survey_intro_participants_no_facilitators.csv", row.names = FALSE)
+```
+
+### Label comments by skill group
+```{r label-comments}
+# Label commenter skill
+comments$commenter_skill <- ifelse(comments$commenter %in% novices$username, "novice",
+                                          ifelse(comments$commenter %in% experts$username, "expert",
+                                                 ifelse(comments$commenter %in% facilitators, "facilitator",
+                                                        "unknown")))
+# Label reply_to skill
+comments$reply_to_skill <- ifelse(is.na(comments$reply_to), NA,
+                                  ifelse(comments$reply_to %in% novices$username, "novice",
+                                          ifelse(comments$reply_to %in% experts$username, "expert",
+                                                 ifelse(comments$reply_to %in% facilitators, "facilitator",
+                                                        "unknown"))))
+
+# Label project author skill
+comments$project_skill <- ifelse(comments$username %in% novices$username, "novice",
+                                          ifelse(comments$username %in% experts$username, "expert",
+                                                 ifelse(comments$username %in% facilitators, "facilitator",
+                                                        "unknown")))
+
+# Save comments with new skill labels
+write.csv(comments, "comment_csv/commentsAllStudios_with_skill_labels.csv", row.names = FALSE)
+```
+
+### Divide comments by skill group
+```{r divide-comments-skill}
+# Get novice interactions
+novice_interactions <- comments %>% filter(commenter_skill == "novice" | reply_to_skill == "novice" | project_skill == "novice")
+write.csv(novice_interactions,"interactions_by_skill_level/novice_interactions.csv", row.names = FALSE)
+
+# Get expert interactions
+expert_interactions <- comments %>% filter(commenter_skill == "expert" | reply_to_skill == "expert" | project_skill == "expert")
+write.csv(expert_interactions,"interactions_by_skill_level/expert_interactions.csv", row.names = FALSE)
+
+# Get facilitator interactions
+facilitator_interactions <- comments %>% filter(commenter_skill == "facilitator" | reply_to_skill == "facilitator" | project_skill == "facilitator")
+write.csv(facilitator_interactions,"interactions_by_skill_level/facilitator_interactions.csv", row.names = FALSE)
+```
+
+### Divide comments as directed to a project or directed to another user
+```{r divide-comments-type}
+project_comments <- comments %>% filter(is.na(comments$reply_to)) # Project comments are those that do NOT reply to someone else
+reply_comments <- comments %>% filter(!is.na(comments$reply_to)) # Reply comments are those that DO reply to someone else
+
+# Create subset of comment interactions that include only those of users whose skill we know from the intro survey
+project_comments_known <- project_comments %>% filter(!(project_comments$commenter_skill == "unknown" | project_comments$project_skill == "unknown")) 
+reply_comments_known <- reply_comments %>% filter(!(reply_comments$commenter_skill == "unknown" | reply_comments$reply_to_skill == "unknown"))
+```
+
+### Create table of reply counts (across all studios) between skill groups
+```{r reply-counts-all}
+studios <- c(0:10) # Select all studios
+
+# Create variables for the number of novices, experts, and facilitators participating in selected studios
+num_novices <- comments %>% filter(commenter %in% novices$username & studio %in% studios) %>% select(commenter) %>% distinct() %>% count() %>% as.numeric()
+num_experts <- comments %>% filter(commenter %in% experts$username & studio %in% studios) %>% select(commenter) %>% distinct() %>% count() %>% as.numeric()
+num_facilitators <- length(facilitators) %>% as.numeric()
+
+# Create column with number of members from each skill group participating in selected studios
+members_in_skill = c(num_novices,
+                     num_experts,
+                     length(facilitators) %>% as.numeric())
+
+# Create column with skill group names
+commenter_skill = c("novice","expert","facilitator")
+
+# Calculate replies directed to novices, store in column format
+comments_to_novices <- c( 
+  reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill =="novice" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill =="novice" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill =="novice" & studio %in% studios) %>% count() %>% as.numeric()
+)
+
+# Calculate replies directed to experts, store in column format
+comments_to_experts <- c(
+  reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill =="expert" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill =="expert" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill =="expert" & studio %in% studios) %>% count() %>% as.numeric()
+)
+
+# Calculate replies directed to facilitators, store in column format
+comments_to_facilitators <- c( 
+  reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill =="facilitator" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill =="facilitator" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill =="facilitator" & studio %in% studios) %>% count() %>% as.numeric()
+)
+
+# Combine columns we've generated into a single dataframe
+reply_count_studios_all <- data.frame(members_in_skill = members_in_skill,
+                                         commenter_skill = commenter_skill,
+                                         replies_to_novices = comments_to_novices,
+                                         replies_to_experts = comments_to_experts,
+                                         replies_to_facilitators = comments_to_facilitators)
+
+# Add column to calculate reply totals from each group
+reply_count_studios_all$total_comments <- rowSums(reply_count_studios_all[,3:5])
+```
+
+### Check reply counts between different groups (studios 0-3)
+```{r reply-counts-0-3}
+studios <- c(0:3) # Select studios 0-3
+
+# Create variables for the number of novices, experts, and facilitators participating in selected studios
+num_novices <- comments %>% filter(commenter %in% novices$username & studio %in% studios) %>% select(commenter) %>% distinct() %>% count() %>% as.numeric()
+num_experts <- comments %>% filter(commenter %in% experts$username & studio %in% studios) %>% select(commenter) %>% distinct() %>% count() %>% as.numeric()
+num_facilitators <- length(facilitators) %>% as.numeric()
+
+# Create column with number of members from each skill group participating in selected studios
+members_in_skill = c(num_novices,
+                     num_experts,
+                     length(facilitators) %>% as.numeric())
+
+# Create column with skill group names
+commenter_skill = c("novice","expert","facilitator")
+
+# Calculate replies directed to novices, store in column format
+comments_to_novices <- c( 
+  reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill =="novice" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill =="novice" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill =="novice" & studio %in% studios) %>% count() %>% as.numeric()
+)
+
+# Calculate replies directed to experts, store in column format
+comments_to_experts <- c(
+  reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill =="expert" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill =="expert" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill =="expert" & studio %in% studios) %>% count() %>% as.numeric()
+)
+
+# Calculate replies directed to facilitators, store in column format
+comments_to_facilitators <- c( 
+  reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill =="facilitator" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill =="facilitator" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill =="facilitator" & studio %in% studios) %>% count() %>% as.numeric()
+)
+
+# Combine columns we've generated into a single dataframe
+reply_count_studios_0_3 <- data.frame(members_in_skill = members_in_skill,
+                                         commenter_skill = commenter_skill,
+                                         replies_to_novices = comments_to_novices,
+                                         replies_to_experts = comments_to_experts,
+                                         replies_to_facilitators = comments_to_facilitators)
+
+reply_count_studios_0_3$total_comments <- rowSums(reply_count_studios_0_3[,3:5])
+```
+
+### Check reply counts between different groups (Studios 4-7)
+```{r reply-counts-4-7}
+studios <- c(4:7) # Select studios 4-7
+
+# Create variables for the number of novices, experts, and facilitators participating in selected studios
+num_novices <- comments %>% filter(commenter %in% novices$username & studio %in% studios) %>% select(commenter) %>% distinct() %>% count() %>% as.numeric()
+num_experts <- comments %>% filter(commenter %in% experts$username & studio %in% studios) %>% select(commenter) %>% distinct() %>% count() %>% as.numeric()
+num_facilitators <- length(facilitators) %>% as.numeric()
+
+# Create column with number of members from each skill group participating in selected studios
+members_in_skill = c(num_novices,
+                     num_experts,
+                     length(facilitators) %>% as.numeric())
+
+# Create column with skill group names
+commenter_skill = c("novice","expert","facilitator")
+
+# Calculate replies directed to novices, store in column format
+comments_to_novices <- c( 
+  reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill =="novice" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill =="novice" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill =="novice" & studio %in% studios) %>% count() %>% as.numeric()
+)
+
+# Calculate replies directed to experts, store in column format
+comments_to_experts <- c(
+  reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill =="expert" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill =="expert" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill =="expert" & studio %in% studios) %>% count() %>% as.numeric()
+)
+
+# Calculate replies directed to facilitators, store in column format
+comments_to_facilitators <- c( 
+  reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill =="facilitator" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill =="facilitator" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill =="facilitator" & studio %in% studios) %>% count() %>% as.numeric()
+)
+
+# Combine columns we've generated into a single dataframe
+reply_count_studios_4_7 <- data.frame(members_in_skill = members_in_skill,
+                                         commenter_skill = commenter_skill,
+                                         replies_to_novices = comments_to_novices,
+                                         replies_to_experts = comments_to_experts,
+                                         replies_to_facilitators = comments_to_facilitators)
+
+reply_count_studios_4_7$total_comments <- rowSums(reply_count_studios_4_7[,3:5])
+
+```
+
+### Check reply counts between different groups (Studios 8-10)
+```{r reply-counts-8-10}
+studios <- c(8:10) # Select studios 8-10
+
+# Create variables for the number of novices, experts, and facilitators participating in selected studios
+num_novices <- comments %>% filter(commenter %in% novices$username & studio %in% studios) %>% select(commenter) %>% distinct() %>% count() %>% as.numeric()
+num_experts <- comments %>% filter(commenter %in% experts$username & studio %in% studios) %>% select(commenter) %>% distinct() %>% count() %>% as.numeric()
+num_facilitators <- length(facilitators) %>% as.numeric()
+
+# Create column with number of members from each skill group participating in selected studios
+members_in_skill = c(num_novices,
+                     num_experts,
+                     length(facilitators) %>% as.numeric())
+
+# Create column with skill group names
+commenter_skill = c("novice","expert","facilitator")
+
+# Calculate replies directed to novices, store in column format
+comments_to_novices <- c( 
+  reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill =="novice" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill =="novice" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill =="novice" & studio %in% studios) %>% count() %>% as.numeric()
+)
+
+# Calculate replies directed to experts, store in column format
+comments_to_experts <- c(
+  reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill =="expert" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill =="expert" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill =="expert" & studio %in% studios) %>% count() %>% as.numeric()
+)
+
+# Calculate replies directed to facilitators, store in column format
+comments_to_facilitators <- c( 
+  reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill =="facilitator" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill =="facilitator" & studio %in% studios) %>% count() %>% as.numeric(),
+  reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill =="facilitator" & studio %in% studios) %>% count() %>% as.numeric()
+)
+
+# Combine columns we've generated into a single dataframe
+reply_count_studios_8_10 <- data.frame(members_in_skill = members_in_skill,
+                                         commenter_skill = commenter_skill,
+                                         replies_to_novices = comments_to_novices,
+                                         replies_to_experts = comments_to_experts,
+                                         replies_to_facilitators = comments_to_facilitators)
+
+reply_count_studios_8_10$total_comments <- rowSums(reply_count_studios_8_10[,3:5])
+
+```
+
+### Check ALL comment counts (project & replies) between different groups (across all studios)
+```{r comment-counts-all}
+studios <- c(0:10) # Select all studios
+
+# Create column with skill group names
+commenter_skill = c("novice","expert","facilitator")
+
+# Create variables for the number of novices, experts, and facilitators participating in selected studios - store as column
+num_novices <- comments %>% filter(commenter %in% novices$username & studio %in% studios) %>% select(commenter) %>% distinct() %>% count() %>% as.numeric()
+num_experts <- comments %>% filter(commenter %in% experts$username & studio %in% studios) %>% select(commenter) %>% distinct() %>% count() %>% as.numeric()
+num_facilitators <- length(facilitators) %>% as.numeric()
+
+members_in_skill = c(num_novices,
+                     num_experts,
+                     length(facilitators) %>% as.numeric())
+
+# Calculate comments (replies & project comments) directed to novices, store in column format
+comments_to_novices <- c( 
+  (project_comments_known %>% filter(commenter_skill == "novice" & project_skill =="novice" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill == "novice" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "expert" & project_skill =="novice" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill == "novice" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "facilitator" & project_skill =="novice" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill == "novice" & studio %in% studios) %>% count()) %>% as.numeric()
+)
+
+# Calculate comments (replies & project comments) directed to experts, store in column format
+comments_to_experts <- c( 
+  (project_comments_known %>% filter(commenter_skill == "novice" & project_skill =="expert" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill == "expert" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "expert" & project_skill =="expert" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill == "expert" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "facilitator" & project_skill =="expert" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill == "expert" & studio %in% studios) %>% count()) %>% as.numeric()
+)
+
+# Calculate comments (replies & project comments) directed to facilitators, store in column format
+comments_to_facilitators <- c( 
+  (project_comments_known %>% filter(commenter_skill == "novice" & project_skill =="facilitator" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill == "facilitator" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "expert" & project_skill =="facilitator" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill == "facilitator" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "facilitator" & project_skill =="facilitator" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill == "facilitator" & studio %in% studios) %>% count()) %>% as.numeric()
+)
+
+# For each skill group, calculate the proportion of their comments they sent to novices - store as column
+prop_to_novices <- c(comments_to_novices[1] / (comments_to_novices[1] + comments_to_experts[1] + comments_to_facilitators[1]),
+                     comments_to_novices[2] / (comments_to_novices[2] + comments_to_experts[2] + comments_to_facilitators[2]),
+                     comments_to_novices[3] / (comments_to_novices[3] + comments_to_experts[3] + comments_to_facilitators[3]))
+
+# For each skill group, calculate the proportion of their comments they sent to experts - store as column
+prop_to_experts <- c(comments_to_experts[1] / (comments_to_novices[1] + comments_to_experts[1] + comments_to_facilitators[1]),
+                     comments_to_experts[2] / (comments_to_novices[2] + comments_to_experts[2] + comments_to_facilitators[2]),
+                     comments_to_experts[3] / (comments_to_novices[3] + comments_to_experts[3] + comments_to_facilitators[3]))
+
+# For each skill group, calculate the proportion of their comments they sent to facilitators - store as column
+prop_to_facilitators <- c(comments_to_facilitators[1] / (comments_to_novices[1] + comments_to_experts[1] + comments_to_facilitators[1]),
+                     comments_to_facilitators[2] / (comments_to_novices[2] + comments_to_experts[2] + comments_to_facilitators[2]),
+                     comments_to_facilitators[3] / (comments_to_novices[3] + comments_to_experts[3] + comments_to_facilitators[3]))
+
+# For each skill group, calculate their external ties (comments directed outside of their group, per external group-member) - store as column
+external_ties <- c((comments_to_experts[1] + comments_to_facilitators[1]) / (num_experts + num_facilitators),
+                   (comments_to_novices[2] + comments_to_facilitators[2]) / (num_novices + num_facilitators),
+                   (comments_to_novices[2] + comments_to_experts[3]) / (num_novices + num_experts))
+
+# For each skill group, calculate their internal ties (comments directed to their own group, per internal group-member) - store as column
+internal_ties <- c(comments_to_novices[1] / num_novices,
+                   comments_to_experts[2] / num_experts,
+                   comments_to_facilitators[3] / num_facilitators)
+
+# Calculate EI Index [(External Ties - Internal Ties / External Ties + Internal Ties)] - store as column
+EI_index <- c((external_ties[1] - internal_ties[1]) / (external_ties[1] + internal_ties[1]),
+              (external_ties[2] - internal_ties[2]) / (external_ties[2] + internal_ties[2]),
+              (external_ties[3] - internal_ties[3]) / (external_ties[3] + internal_ties[3]))
+
+# Combine the columns we have generated into a DataFrame
+comment_count_studios_all <- data.frame(commenter_skill = commenter_skill,
+                                        members_in_skill = members_in_skill,
+                                        comments_to_novices = comments_to_novices,
+                                        comments_to_experts = comments_to_experts,
+                                        comments_to_facilitators = comments_to_facilitators,
+                                        prop_to_novices = prop_to_novices,
+                                        prop_to_experts = prop_to_experts,
+                                        prop_to_facilitators = prop_to_facilitators,
+                                        external_ties = external_ties,
+                                        internal_ties = internal_ties,
+                                        EI_index = EI_index)
+
+# Add a column to represent the sum of comments by each skill group
+comment_count_studios_all$total_comments <- rowSums(comment_count_studios_all[,3:5])
+```
+
+
+### Check project comment counts between different groups (Studios 0-3)
+```{r comment-counts-0-3}
+studios <- c(0:3)
+
+# Create column with skill group names
+commenter_skill = c("novice","expert","facilitator")
+
+# Create variables for the number of novices, experts, and facilitators participating in selected studios - store as column
+num_novices <- comments %>% filter(commenter %in% novices$username & studio %in% studios) %>% select(commenter) %>% distinct() %>% count() %>% as.numeric()
+num_experts <- comments %>% filter(commenter %in% experts$username & studio %in% studios) %>% select(commenter) %>% distinct() %>% count() %>% as.numeric()
+num_facilitators <- length(facilitators) %>% as.numeric()
+
+members_in_skill = c(num_novices,
+                     num_experts,
+                     length(facilitators) %>% as.numeric())
+
+# Calculate comments (replies & project comments) directed to novices, store in column format
+comments_to_novices <- c( 
+  (project_comments_known %>% filter(commenter_skill == "novice" & project_skill =="novice" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill == "novice" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "expert" & project_skill =="novice" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill == "novice" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "facilitator" & project_skill =="novice" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill == "novice" & studio %in% studios) %>% count()) %>% as.numeric()
+)
+
+# Calculate comments (replies & project comments) directed to experts, store in column format
+comments_to_experts <- c( 
+  (project_comments_known %>% filter(commenter_skill == "novice" & project_skill =="expert" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill == "expert" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "expert" & project_skill =="expert" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill == "expert" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "facilitator" & project_skill =="expert" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill == "expert" & studio %in% studios) %>% count()) %>% as.numeric()
+)
+
+# Calculate comments (replies & project comments) directed to facilitators, store in column format
+comments_to_facilitators <- c( 
+  (project_comments_known %>% filter(commenter_skill == "novice" & project_skill =="facilitator" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill == "facilitator" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "expert" & project_skill =="facilitator" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill == "facilitator" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "facilitator" & project_skill =="facilitator" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill == "facilitator" & studio %in% studios) %>% count()) %>% as.numeric()
+)
+
+# For each skill group, calculate the proportion of their comments they sent to novices - store as column
+prop_to_novices <- c(comments_to_novices[1] / (comments_to_novices[1] + comments_to_experts[1] + comments_to_facilitators[1]),
+                     comments_to_novices[2] / (comments_to_novices[2] + comments_to_experts[2] + comments_to_facilitators[2]),
+                     comments_to_novices[3] / (comments_to_novices[3] + comments_to_experts[3] + comments_to_facilitators[3]))
+
+# For each skill group, calculate the proportion of their comments they sent to experts - store as column
+prop_to_experts <- c(comments_to_experts[1] / (comments_to_novices[1] + comments_to_experts[1] + comments_to_facilitators[1]),
+                     comments_to_experts[2] / (comments_to_novices[2] + comments_to_experts[2] + comments_to_facilitators[2]),
+                     comments_to_experts[3] / (comments_to_novices[3] + comments_to_experts[3] + comments_to_facilitators[3]))
+
+# For each skill group, calculate the proportion of their comments they sent to facilitators - store as column
+prop_to_facilitators <- c(comments_to_facilitators[1] / (comments_to_novices[1] + comments_to_experts[1] + comments_to_facilitators[1]),
+                     comments_to_facilitators[2] / (comments_to_novices[2] + comments_to_experts[2] + comments_to_facilitators[2]),
+                     comments_to_facilitators[3] / (comments_to_novices[3] + comments_to_experts[3] + comments_to_facilitators[3]))
+
+# For each skill group, calculate their external ties (comments directed outside of their group, per external group-member) - store as column
+external_ties <- c((comments_to_experts[1] + comments_to_facilitators[1]) / (num_experts + num_facilitators),
+                   (comments_to_novices[2] + comments_to_facilitators[2]) / (num_novices + num_facilitators),
+                   (comments_to_novices[2] + comments_to_experts[3]) / (num_novices + num_experts))
+
+# For each skill group, calculate their internal ties (comments directed to their own group, per internal group-member) - store as column
+internal_ties <- c(comments_to_novices[1] / num_novices,
+                   comments_to_experts[2] / num_experts,
+                   comments_to_facilitators[3] / num_facilitators)
+
+# Calculate EI Index [(External Ties - Internal Ties / External Ties + Internal Ties)] - store as column
+EI_index <- c((external_ties[1] - internal_ties[1]) / (external_ties[1] + internal_ties[1]),
+              (external_ties[2] - internal_ties[2]) / (external_ties[2] + internal_ties[2]),
+              (external_ties[3] - internal_ties[3]) / (external_ties[3] + internal_ties[3]))
+
+# Combine the columns we have generated into a DataFrame
+comment_count_studios_0_3 <- data.frame(commenter_skill = commenter_skill,
+                                        members_in_skill = members_in_skill,
+                                        comments_to_novices = comments_to_novices,
+                                        comments_to_experts = comments_to_experts,
+                                        comments_to_facilitators = comments_to_facilitators,
+                                        prop_to_novices = prop_to_novices,
+                                        prop_to_experts = prop_to_experts,
+                                        prop_to_facilitators = prop_to_facilitators,
+                                        external_ties = external_ties,
+                                        internal_ties = internal_ties,
+                                        EI_index = EI_index)
+
+# Add a column to represent the sum of comments by each skill group
+comment_count_studios_0_3$total_comments <- rowSums(comment_count_studios_0_3[,3:5])
+```
+
+### Check project comment counts between different groups (Studios 4-7)
+```{r comment-counts-4-7}
+studios <- c(4:7)
+
+# Create column with skill group names
+commenter_skill = c("novice","expert","facilitator")
+
+# Create variables for the number of novices, experts, and facilitators participating in selected studios - store as column
+num_novices <- comments %>% filter(commenter %in% novices$username & studio %in% studios) %>% select(commenter) %>% distinct() %>% count() %>% as.numeric()
+num_experts <- comments %>% filter(commenter %in% experts$username & studio %in% studios) %>% select(commenter) %>% distinct() %>% count() %>% as.numeric()
+num_facilitators <- length(facilitators) %>% as.numeric()
+
+members_in_skill = c(num_novices,
+                     num_experts,
+                     length(facilitators) %>% as.numeric())
+
+# Calculate comments (replies & project comments) directed to novices, store in column format
+comments_to_novices <- c( 
+  (project_comments_known %>% filter(commenter_skill == "novice" & project_skill =="novice" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill == "novice" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "expert" & project_skill =="novice" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill == "novice" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "facilitator" & project_skill =="novice" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill == "novice" & studio %in% studios) %>% count()) %>% as.numeric()
+)
+
+# Calculate comments (replies & project comments) directed to experts, store in column format
+comments_to_experts <- c( 
+  (project_comments_known %>% filter(commenter_skill == "novice" & project_skill =="expert" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill == "expert" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "expert" & project_skill =="expert" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill == "expert" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "facilitator" & project_skill =="expert" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill == "expert" & studio %in% studios) %>% count()) %>% as.numeric()
+)
+
+# Calculate comments (replies & project comments) directed to facilitators, store in column format
+comments_to_facilitators <- c( 
+  (project_comments_known %>% filter(commenter_skill == "novice" & project_skill =="facilitator" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill == "facilitator" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "expert" & project_skill =="facilitator" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill == "facilitator" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "facilitator" & project_skill =="facilitator" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill == "facilitator" & studio %in% studios) %>% count()) %>% as.numeric()
+)
+
+# For each skill group, calculate the proportion of their comments they sent to novices - store as column
+prop_to_novices <- c(comments_to_novices[1] / (comments_to_novices[1] + comments_to_experts[1] + comments_to_facilitators[1]),
+                     comments_to_novices[2] / (comments_to_novices[2] + comments_to_experts[2] + comments_to_facilitators[2]),
+                     comments_to_novices[3] / (comments_to_novices[3] + comments_to_experts[3] + comments_to_facilitators[3]))
+
+# For each skill group, calculate the proportion of their comments they sent to experts - store as column
+prop_to_experts <- c(comments_to_experts[1] / (comments_to_novices[1] + comments_to_experts[1] + comments_to_facilitators[1]),
+                     comments_to_experts[2] / (comments_to_novices[2] + comments_to_experts[2] + comments_to_facilitators[2]),
+                     comments_to_experts[3] / (comments_to_novices[3] + comments_to_experts[3] + comments_to_facilitators[3]))
+
+# For each skill group, calculate the proportion of their comments they sent to facilitators - store as column
+prop_to_facilitators <- c(comments_to_facilitators[1] / (comments_to_novices[1] + comments_to_experts[1] + comments_to_facilitators[1]),
+                     comments_to_facilitators[2] / (comments_to_novices[2] + comments_to_experts[2] + comments_to_facilitators[2]),
+                     comments_to_facilitators[3] / (comments_to_novices[3] + comments_to_experts[3] + comments_to_facilitators[3]))
+
+# For each skill group, calculate their external ties (comments directed outside of their group, per external group-member) - store as column
+external_ties <- c((comments_to_experts[1] + comments_to_facilitators[1]) / (num_experts + num_facilitators),
+                   (comments_to_novices[2] + comments_to_facilitators[2]) / (num_novices + num_facilitators),
+                   (comments_to_novices[2] + comments_to_experts[3]) / (num_novices + num_experts))
+
+# For each skill group, calculate their internal ties (comments directed to their own group, per internal group-member) - store as column
+internal_ties <- c(comments_to_novices[1] / num_novices,
+                   comments_to_experts[2] / num_experts,
+                   comments_to_facilitators[3] / num_facilitators)
+
+# Calculate EI Index [(External Ties - Internal Ties / External Ties + Internal Ties)] - store as column
+EI_index <- c((external_ties[1] - internal_ties[1]) / (external_ties[1] + internal_ties[1]),
+              (external_ties[2] - internal_ties[2]) / (external_ties[2] + internal_ties[2]),
+              (external_ties[3] - internal_ties[3]) / (external_ties[3] + internal_ties[3]))
+
+# Combine the columns we have generated into a DataFrame
+comment_count_studios_4_7 <- data.frame(commenter_skill = commenter_skill,
+                                        members_in_skill = members_in_skill,
+                                        comments_to_novices = comments_to_novices,
+                                        comments_to_experts = comments_to_experts,
+                                        comments_to_facilitators = comments_to_facilitators,
+                                        prop_to_novices = prop_to_novices,
+                                        prop_to_experts = prop_to_experts,
+                                        prop_to_facilitators = prop_to_facilitators,
+                                        external_ties = external_ties,
+                                        internal_ties = internal_ties,
+                                        EI_index = EI_index)
+
+# Add a column to represent the sum of comments by each skill group
+comment_count_studios_4_7$total_comments <- rowSums(comment_count_studios_4_7[,3:5])
+```
+
+### Check project comment counts between different groups (Studios 8-10)
+```{r comment-counts-8-10}
+studios <- c(8:10)
+
+# Create column with skill group names
+commenter_skill = c("novice","expert","facilitator")
+
+# Create variables for the number of novices, experts, and facilitators participating in selected studios - store as column
+num_novices <- comments %>% filter(commenter %in% novices$username & studio %in% studios) %>% select(commenter) %>% distinct() %>% count() %>% as.numeric()
+num_experts <- comments %>% filter(commenter %in% experts$username & studio %in% studios) %>% select(commenter) %>% distinct() %>% count() %>% as.numeric()
+num_facilitators <- length(facilitators) %>% as.numeric()
+
+members_in_skill = c(num_novices,
+                     num_experts,
+                     length(facilitators) %>% as.numeric())
+
+# Calculate comments (replies & project comments) directed to novices, store in column format
+comments_to_novices <- c( 
+  (project_comments_known %>% filter(commenter_skill == "novice" & project_skill =="novice" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill == "novice" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "expert" & project_skill =="novice" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill == "novice" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "facilitator" & project_skill =="novice" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill == "novice" & studio %in% studios) %>% count()) %>% as.numeric()
+)
+
+# Calculate comments (replies & project comments) directed to experts, store in column format
+comments_to_experts <- c( 
+  (project_comments_known %>% filter(commenter_skill == "novice" & project_skill =="expert" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill == "expert" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "expert" & project_skill =="expert" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill == "expert" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "facilitator" & project_skill =="expert" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill == "expert" & studio %in% studios) %>% count()) %>% as.numeric()
+)
+
+# Calculate comments (replies & project comments) directed to facilitators, store in column format
+comments_to_facilitators <- c( 
+  (project_comments_known %>% filter(commenter_skill == "novice" & project_skill =="facilitator" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "novice" & reply_to_skill == "facilitator" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "expert" & project_skill =="facilitator" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "expert" & reply_to_skill == "facilitator" & studio %in% studios) %>% count()) %>% as.numeric(),
+  (project_comments_known %>% filter(commenter_skill == "facilitator" & project_skill =="facilitator" & studio %in% studios) %>% count() + reply_comments_known %>% filter(commenter_skill == "facilitator" & reply_to_skill == "facilitator" & studio %in% studios) %>% count()) %>% as.numeric()
+)
+
+# For each skill group, calculate the proportion of their comments they sent to novices - store as column
+prop_to_novices <- c(comments_to_novices[1] / (comments_to_novices[1] + comments_to_experts[1] + comments_to_facilitators[1]),
+                     comments_to_novices[2] / (comments_to_novices[2] + comments_to_experts[2] + comments_to_facilitators[2]),
+                     comments_to_novices[3] / (comments_to_novices[3] + comments_to_experts[3] + comments_to_facilitators[3]))
+
+# For each skill group, calculate the proportion of their comments they sent to experts - store as column
+prop_to_experts <- c(comments_to_experts[1] / (comments_to_novices[1] + comments_to_experts[1] + comments_to_facilitators[1]),
+                     comments_to_experts[2] / (comments_to_novices[2] + comments_to_experts[2] + comments_to_facilitators[2]),
+                     comments_to_experts[3] / (comments_to_novices[3] + comments_to_experts[3] + comments_to_facilitators[3]))
+
+# For each skill group, calculate the proportion of their comments they sent to facilitators - store as column
+prop_to_facilitators <- c(comments_to_facilitators[1] / (comments_to_novices[1] + comments_to_experts[1] + comments_to_facilitators[1]),
+                     comments_to_facilitators[2] / (comments_to_novices[2] + comments_to_experts[2] + comments_to_facilitators[2]),
+                     comments_to_facilitators[3] / (comments_to_novices[3] + comments_to_experts[3] + comments_to_facilitators[3]))
+
+# For each skill group, calculate their external ties (comments directed outside of their group, per external group-member) - store as column
+external_ties <- c((comments_to_experts[1] + comments_to_facilitators[1]) / (num_experts + num_facilitators),
+                   (comments_to_novices[2] + comments_to_facilitators[2]) / (num_novices + num_facilitators),
+                   (comments_to_novices[2] + comments_to_experts[3]) / (num_novices + num_experts))
+
+# For each skill group, calculate their internal ties (comments directed to their own group, per internal group-member) - store as column
+internal_ties <- c(comments_to_novices[1] / num_novices,
+                   comments_to_experts[2] / num_experts,
+                   comments_to_facilitators[3] / num_facilitators)
+
+# Calculate EI Index [(External Ties - Internal Ties / External Ties + Internal Ties)] - store as column
+EI_index <- c((external_ties[1] - internal_ties[1]) / (external_ties[1] + internal_ties[1]),
+              (external_ties[2] - internal_ties[2]) / (external_ties[2] + internal_ties[2]),
+              (external_ties[3] - internal_ties[3]) / (external_ties[3] + internal_ties[3]))
+
+# Combine the columns we have generated into a DataFrame
+comment_count_studios_8_10 <- data.frame(commenter_skill = commenter_skill,
+                                        members_in_skill = members_in_skill,
+                                        comments_to_novices = comments_to_novices,
+                                        comments_to_experts = comments_to_experts,
+                                        comments_to_facilitators = comments_to_facilitators,
+                                        prop_to_novices = prop_to_novices,
+                                        prop_to_experts = prop_to_experts,
+                                        prop_to_facilitators = prop_to_facilitators,
+                                        external_ties = external_ties,
+                                        internal_ties = internal_ties,
+                                        EI_index = EI_index)
+
+# Add a column to represent the sum of comments by each skill group
+comment_count_studios_8_10$total_comments <- rowSums(comment_count_studios_8_10[,3:5])
+```
+
+### Save results
+```{r}
+write.csv(reply_count_studios_all, "comment_count/reply_count_all_studios.csv", row.names = FALSE)
+write.csv(reply_count_studios_0_3, "comment_count/reply_count_studios_0_3.csv", row.names = FALSE)
+write.csv(reply_count_studios_4_7, "comment_count/reply_count_studios_4_7.csv", row.names = FALSE)
+write.csv(reply_count_studios_8_10, "comment_count/reply_count_studios_8_10.csv", row.names = FALSE)
+write.csv(comment_count_studios_all, "comment_count/comment_count_all_studios.csv", row.names = FALSE)
+write.csv(comment_count_studios_0_3, "comment_count/comment_count_studios_0_3.csv", row.names = FALSE)
+write.csv(comment_count_studios_4_7, "comment_count/comment_count_studios_4_7.csv", row.names = FALSE)
+write.csv(comment_count_studios_8_10, "comment_count/comment_count_studios_8_10.csv", row.names = FALSE)
+```
